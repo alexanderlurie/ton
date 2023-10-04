@@ -28,11 +28,46 @@ namespace ton {
 
 namespace validator {
 
+class CellDbAsyncExecutor : public vm::DynamicBagOfCellsDb::AsyncExecutor {
+ public:
+  explicit CellDbAsyncExecutor(td::actor::ActorId<CellDbBase> cell_db) : cell_db_(std::move(cell_db)) {
+  }
+
+  void execute_async(std::function<void()> f) override {
+    class Runner : public td::actor::Actor {
+     public:
+      explicit Runner(std::function<void()> f) : f_(std::move(f)) {}
+      void start_up() override {
+        f_();
+        stop();
+      }
+     private:
+      std::function<void()> f_;
+    };
+    td::actor::create_actor<Runner>("executeasync", std::move(f)).release();
+  }
+
+  void execute_sync(std::function<void()> f) override {
+    td::actor::send_closure(cell_db_, &CellDbBase::execute_sync, std::move(f));
+  }
+ private:
+  td::actor::ActorId<CellDbBase> cell_db_;
+};
+
+void CellDbBase::start_up() {
+  async_executor = std::make_shared<CellDbAsyncExecutor>(actor_id(this));
+}
+
+void CellDbBase::execute_sync(std::function<void()> f) {
+  f();
+}
+
 CellDbIn::CellDbIn(td::actor::ActorId<RootDb> root_db, td::actor::ActorId<CellDb> parent, std::string path)
     : root_db_(root_db), parent_(parent), path_(std::move(path)) {
 }
 
 void CellDbIn::start_up() {
+  CellDbBase::start_up();
   cell_db_ = std::make_shared<td::RocksDb>(td::RocksDb::open(path_).move_as_ok());
 
   boc_ = vm::DynamicBagOfCellsDb::create();
@@ -48,16 +83,14 @@ void CellDbIn::start_up() {
     set_block(empty, std::move(e));
     cell_db_->commit_write_batch().ensure();
   }
-  last_gc_ = empty;
 }
 
 void CellDbIn::load_cell(RootHash hash, td::Promise<td::Ref<vm::DataCell>> promise) {
-  td::PerfWarningTimer{"loadcell", 0.1};
-  promise.set_result(boc_->load_cell(hash.as_slice()));
+  boc_->load_cell_async(hash.as_slice(), async_executor, std::move(promise));
 }
 
 void CellDbIn::store_cell(BlockIdExt block_id, td::Ref<vm::Cell> cell, td::Promise<td::Ref<vm::DataCell>> promise) {
-  td::PerfWarningTimer{"storecell", 0.1};
+  td::PerfWarningTimer timer{"storecell", 0.1};
   auto key_hash = get_key_hash(block_id);
   auto R = get_block(key_hash);
   // duplicate
@@ -102,18 +135,20 @@ void CellDbIn::store_cell(BlockIdExt block_id, td::Ref<vm::Cell> cell, td::Promi
   promise.set_result(boc_->load_cell(cell->get_hash().as_slice()));
 }
 
-void CellDbIn::alarm() {
-  auto R = get_block(last_gc_);
-  R.ensure();
+void CellDbIn::get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) {
+  promise.set_result(boc_->get_cell_db_reader());
+}
 
-  auto N = R.move_as_ok();
+void CellDbIn::alarm() {
+  auto E = get_block(get_empty_key_hash()).move_as_ok();
+  auto N = get_block(E.next).move_as_ok();
   if (N.is_empty()) {
-    last_gc_ = N.next;
     alarm_timestamp() = td::Timestamp::in(0.1);
     return;
   }
 
-  auto P = td::PromiseCreator::lambda([SelfId = actor_id(this)](td::Result<bool> R) {
+  auto block_id = N.block_id;
+  auto P = td::PromiseCreator::lambda([SelfId = actor_id(this), block_id](td::Result<bool> R) {
     if (R.is_error()) {
       td::actor::send_closure(SelfId, &CellDbIn::skip_gc);
     } else {
@@ -121,24 +156,19 @@ void CellDbIn::alarm() {
       if (!value) {
         td::actor::send_closure(SelfId, &CellDbIn::skip_gc);
       } else {
-        td::actor::send_closure(SelfId, &CellDbIn::gc);
+        td::actor::send_closure(SelfId, &CellDbIn::gc, block_id);
       }
     }
   });
-  td::actor::send_closure(root_db_, &RootDb::allow_state_gc, N.block_id, std::move(P));
+  td::actor::send_closure(root_db_, &RootDb::allow_state_gc, block_id, std::move(P));
 }
 
-void CellDbIn::gc() {
-  auto R = get_block(last_gc_);
-  R.ensure();
-
-  auto N = R.move_as_ok();
-
+void CellDbIn::gc(BlockIdExt block_id) {
   auto P = td::PromiseCreator::lambda([SelfId = actor_id(this)](td::Result<BlockHandle> R) {
     R.ensure();
     td::actor::send_closure(SelfId, &CellDbIn::gc_cont, R.move_as_ok());
   });
-  td::actor::send_closure(root_db_, &RootDb::get_block_handle_external, N.block_id, false, std::move(P));
+  td::actor::send_closure(root_db_, &RootDb::get_block_handle_external, block_id, false, std::move(P));
 }
 
 void CellDbIn::gc_cont(BlockHandle handle) {
@@ -156,9 +186,10 @@ void CellDbIn::gc_cont(BlockHandle handle) {
 }
 
 void CellDbIn::gc_cont2(BlockHandle handle) {
-  td::PerfWarningTimer{"gccell", 0.1};
+  td::PerfWarningTimer timer{"gccell", 0.1};
 
-  auto FR = get_block(last_gc_);
+  auto key_hash = get_key_hash(handle->id());
+  auto FR = get_block(key_hash);
   FR.ensure();
   auto F = FR.move_as_ok();
 
@@ -180,10 +211,10 @@ void CellDbIn::gc_cont2(BlockHandle handle) {
 
   boc_->dec(cell);
   boc_->prepare_commit().ensure();
-  vm::CellStorer stor{*cell_db_.get()};
+  vm::CellStorer stor{*cell_db_};
   cell_db_->begin_write_batch().ensure();
   boc_->commit(stor).ensure();
-  cell_db_->erase(get_key(last_gc_)).ensure();
+  cell_db_->erase(get_key(key_hash)).ensure();
   set_block(F.prev, std::move(P));
   set_block(F.next, std::move(N));
   cell_db_->commit_write_batch().ensure();
@@ -192,16 +223,11 @@ void CellDbIn::gc_cont2(BlockHandle handle) {
   boc_->set_loader(std::make_unique<vm::CellLoader>(cell_db_->snapshot())).ensure();
   td::actor::send_closure(parent_, &CellDb::update_snapshot, cell_db_->snapshot());
 
-  DCHECK(get_block(last_gc_).is_error());
-  last_gc_ = F.next;
+  DCHECK(get_block(key_hash).is_error());
 }
 
 void CellDbIn::skip_gc() {
-  auto FR = get_block(last_gc_);
-  FR.ensure();
-  auto F = FR.move_as_ok();
-  last_gc_ = F.next;
-  alarm_timestamp() = td::Timestamp::in(0.01);
+  alarm_timestamp() = td::Timestamp::in(1.0);
 }
 
 std::string CellDbIn::get_key(KeyHash key_hash) {
@@ -251,12 +277,15 @@ void CellDb::load_cell(RootHash hash, td::Promise<td::Ref<vm::DataCell>> promise
   if (!started_) {
     td::actor::send_closure(cell_db_, &CellDbIn::load_cell, hash, std::move(promise));
   } else {
-    auto R = boc_->load_cell(hash.as_slice());
-    if (R.is_error()) {
-      td::actor::send_closure(cell_db_, &CellDbIn::load_cell, hash, std::move(promise));
-    } else {
-      promise.set_result(R.move_as_ok());
-    }
+    auto P = td::PromiseCreator::lambda(
+        [cell_db_in = cell_db_.get(), hash, promise = std::move(promise)](td::Result<td::Ref<vm::DataCell>> R) mutable {
+          if (R.is_error()) {
+            td::actor::send_closure(cell_db_in, &CellDbIn::load_cell, hash, std::move(promise));
+          } else {
+            promise.set_result(R.move_as_ok());
+          }
+        });
+    boc_->load_cell_async(hash.as_slice(), async_executor, std::move(P));
   }
 }
 
@@ -264,7 +293,12 @@ void CellDb::store_cell(BlockIdExt block_id, td::Ref<vm::Cell> cell, td::Promise
   td::actor::send_closure(cell_db_, &CellDbIn::store_cell, block_id, std::move(cell), std::move(promise));
 }
 
+void CellDb::get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) {
+  td::actor::send_closure(cell_db_, &CellDbIn::get_cell_db_reader, std::move(promise));
+}
+
 void CellDb::start_up() {
+  CellDbBase::start_up();
   boc_ = vm::DynamicBagOfCellsDb::create();
   cell_db_ = td::actor::create_actor<CellDbIn>("celldbin", root_db_, actor_id(this), path_);
 }

@@ -27,6 +27,8 @@
 #include "message-queue.h"
 #include "validator/validator.h"
 #include "liteserver.h"
+#include "crypto/vm/db/DynamicBagOfCellsDb.h"
+#include "validator-session/validator-session-types.h"
 
 namespace ton {
 
@@ -55,6 +57,7 @@ class ValidatorManager : public ValidatorManagerInterface {
  public:
   virtual void set_block_state(BlockHandle handle, td::Ref<ShardState> state,
                                td::Promise<td::Ref<ShardState>> promise) = 0;
+  virtual void get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) = 0;
   virtual void store_persistent_state_file(BlockIdExt block_id, BlockIdExt masterchain_block_id, td::BufferSlice state,
                                            td::Promise<td::Unit> promise) = 0;
   virtual void store_persistent_state_file_gen(BlockIdExt block_id, BlockIdExt masterchain_block_id,
@@ -158,11 +161,14 @@ class ValidatorManager : public ValidatorManagerInterface {
   virtual void update_last_known_key_block(BlockHandle handle, bool send_request) = 0;
   virtual void update_gc_block_handle(BlockHandle handle, td::Promise<td::Unit> promise) = 0;
 
-  virtual void update_shard_client_block_handle(BlockHandle handle, td::Promise<td::Unit> promise) = 0;
+  virtual void update_shard_client_block_handle(BlockHandle handle, td::Ref<MasterchainState> state,
+                                                td::Promise<td::Unit> promise) = 0;
 
   virtual void truncate(BlockSeqno seqno, ConstBlockHandle handle, td::Promise<td::Unit> promise) = 0;
 
   virtual void wait_shard_client_state(BlockSeqno seqno, td::Timestamp timeout, td::Promise<td::Unit> promise) = 0;
+
+  virtual void log_validator_session_stats(BlockIdExt block_id, validatorsession::ValidatorSessionStats stats) = 0;
 
   static bool is_persistent_state(UnixTime ts, UnixTime prev_ts) {
     return ts / (1 << 17) != prev_ts / (1 << 17);

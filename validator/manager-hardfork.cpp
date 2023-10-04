@@ -151,7 +151,7 @@ void ValidatorManagerImpl::get_key_block_proof_link(BlockIdExt block_id, td::Pro
 }
 
 void ValidatorManagerImpl::new_external_message(td::BufferSlice data) {
-  auto R = create_ext_message(std::move(data));
+  auto R = create_ext_message(std::move(data), block::SizeLimitsConfig::ExtMsgLimits());
   if (R.is_ok()) {
     ext_messages_.emplace_back(R.move_as_ok());
   }
@@ -528,6 +528,10 @@ void ValidatorManagerImpl::get_block_handle(BlockIdExt id, bool force, td::Promi
       });
 
   td::actor::send_closure(db_, &Db::get_block_handle, id, std::move(P));
+}
+
+void ValidatorManagerImpl::get_cell_db_reader(td::Promise<std::shared_ptr<vm::CellDbReader>> promise) {
+  td::actor::send_closure(db_, &Db::get_cell_db_reader, std::move(promise));
 }
 
 void ValidatorManagerImpl::register_block_handle(BlockHandle handle, td::Promise<BlockHandle> promise) {

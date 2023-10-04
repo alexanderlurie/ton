@@ -103,6 +103,9 @@ class StackEntry {
   }
   StackEntry(td::RefInt256 int_ref) : ref(std::move(int_ref)), tp(t_int) {
   }
+  StackEntry(Ref<Cnt<std::string>> str_ref, bool bytes = false)
+      : ref(std::move(str_ref)), tp(bytes ? t_bytes : t_string) {
+  }
   StackEntry(std::string str, bool bytes = false) : ref(), tp(bytes ? t_bytes : t_string) {
     ref = Ref<Cnt<std::string>>{true, std::move(str)};
   }
@@ -320,7 +323,7 @@ class Stack : public td::CntObject {
   Stack(const Stack& old_stack, unsigned copy_elem, unsigned skip_top);
   Stack(Stack&& old_stack, unsigned copy_elem, unsigned skip_top);
   td::CntObject* make_copy() const override {
-    std::cerr << "copy stack at " << (const void*)this << " (" << depth() << " entries)\n";
+    //std::cerr << "copy stack at " << (const void*)this << " (" << depth() << " entries)\n";
     return new Stack{stack};
   }
   void push_from_stack(const Stack& old_stack, unsigned copy_elem, unsigned skip_top = 0);

@@ -90,15 +90,27 @@ void StackEntry::dump(std::ostream& os) const {
       os << dec_string(as_int());
       break;
     case t_cell:
-      os << "C{" << static_cast<Ref<Cell>>(ref)->get_hash().to_hex() << "}";
+      if (ref.not_null()) {
+        os << "C{" << static_cast<Ref<Cell>>(ref)->get_hash().to_hex() << "}";
+      } else {
+        os << "C{null}";
+      }
       break;
     case t_builder:
-      os << "BC{" << static_cast<Ref<CellBuilder>>(ref)->to_hex() << "}";
+      if (ref.not_null()) {
+        os << "BC{" << static_cast<Ref<CellBuilder>>(ref)->to_hex() << "}";
+      } else {
+        os << "BC{null}";
+      }
       break;
     case t_slice: {
-      os << "CS{";
-      static_cast<Ref<CellSlice>>(ref)->dump(os, 1, false);
-      os << '}';
+      if (ref.not_null()) {
+        os << "CS{";
+        static_cast<Ref<CellSlice>>(ref)->dump(os, 1, false);
+        os << '}';
+      } else {
+        os << "CS{null}";
+      }
       break;
     }
     case t_string:
@@ -896,23 +908,29 @@ bool Stack::serialize(vm::CellBuilder& cb, int mode) const {
   if (vsi && !vsi->register_op()) {
     return false;
   }
-  // vm_stack#_ depth:(## 24) stack:(VmStackList depth) = VmStack;
-  unsigned n = depth();
-  if (!cb.store_ulong_rchk_bool(n, 24)) {  // vm_stack#_ depth:(## 24)
-    return false;
-  }
-  if (!n) {
-    return true;
-  }
-  vm::CellBuilder cb2;
-  Ref<vm::Cell> rest = cb2.finalize();  // vm_stk_nil#_ = VmStackList 0;
-  for (unsigned i = 0; i < n - 1; i++) {
-    // vm_stk_cons#_ {n:#} rest:^(VmStackList n) tos:VmStackValue = VmStackList (n + 1);
-    if (!(cb2.store_ref_bool(std::move(rest)) && stack[i].serialize(cb2, mode) && cb2.finalize_to(rest))) {
+  try {
+    // vm_stack#_ depth:(## 24) stack:(VmStackList depth) = VmStack;
+    unsigned n = depth();
+    if (!cb.store_ulong_rchk_bool(n, 24)) {  // vm_stack#_ depth:(## 24)
       return false;
     }
+    if (!n) {
+      return true;
+    }
+    vm::CellBuilder cb2;
+    Ref<vm::Cell> rest = cb2.finalize();  // vm_stk_nil#_ = VmStackList 0;
+    for (unsigned i = 0; i < n - 1; i++) {
+      // vm_stk_cons#_ {n:#} rest:^(VmStackList n) tos:VmStackValue = VmStackList (n + 1);
+      if (!(cb2.store_ref_bool(std::move(rest)) && stack[i].serialize(cb2, mode) && cb2.finalize_to(rest))) {
+        return false;
+      }
+    }
+    return cb.store_ref_bool(std::move(rest)) && stack[n - 1].serialize(cb, mode);
+  } catch (CellBuilder::CellCreateError) {
+    return false;
+  } catch (CellBuilder::CellWriteError) {
+    return false;
   }
-  return cb.store_ref_bool(std::move(rest)) && stack[n - 1].serialize(cb, mode);
 }
 
 bool Stack::deserialize(vm::CellSlice& cs, int mode) {

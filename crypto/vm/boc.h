@@ -18,6 +18,8 @@
 */
 #pragma once
 #include <set>
+#include <map>
+#include "vm/db/DynamicBagOfCellsDb.h"
 #include "vm/cells.h"
 #include "td/utils/Status.h"
 #include "td/utils/buffer.h"
@@ -107,26 +109,37 @@ struct CellStorageStat {
   unsigned long long cells;
   unsigned long long bits;
   unsigned long long public_cells;
-  std::set<vm::Cell::Hash> seen;
+  struct CellInfo {
+    td::uint32 max_merkle_depth = 0;
+  };
+  std::map<vm::Cell::Hash, CellInfo> seen;
   CellStorageStat() : cells(0), bits(0), public_cells(0) {
   }
-  bool clear_seen() {
+  void clear_seen() {
     seen.clear();
-    return true;
   }
   void clear() {
     cells = bits = public_cells = 0;
+    clear_limit();
     clear_seen();
   }
-  bool compute_used_storage(Ref<vm::CellSlice> cs_ref, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool compute_used_storage(const CellSlice& cs, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool compute_used_storage(CellSlice&& cs, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool compute_used_storage(Ref<vm::Cell> cell, bool kill_dup = true, unsigned skip_count_root = 0);
+  void clear_limit() {
+    limit_cells = std::numeric_limits<unsigned long long>::max();
+    limit_bits = std::numeric_limits<unsigned long long>::max();
+  }
+  td::Result<CellInfo> compute_used_storage(Ref<vm::CellSlice> cs_ref, bool kill_dup = true,
+                                            unsigned skip_count_root = 0);
+  td::Result<CellInfo> compute_used_storage(const CellSlice& cs, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> compute_used_storage(CellSlice&& cs, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> compute_used_storage(Ref<vm::Cell> cell, bool kill_dup = true, unsigned skip_count_root = 0);
 
-  bool add_used_storage(Ref<vm::CellSlice> cs_ref, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool add_used_storage(const CellSlice& cs, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool add_used_storage(CellSlice&& cs, bool kill_dup = true, unsigned skip_count_root = 0);
-  bool add_used_storage(Ref<vm::Cell> cell, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> add_used_storage(Ref<vm::CellSlice> cs_ref, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> add_used_storage(const CellSlice& cs, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> add_used_storage(CellSlice&& cs, bool kill_dup = true, unsigned skip_count_root = 0);
+  td::Result<CellInfo> add_used_storage(Ref<vm::Cell> cell, bool kill_dup = true, unsigned skip_count_root = 0);
+
+  unsigned long long limit_cells = std::numeric_limits<unsigned long long>::max();
+  unsigned long long limit_bits = std::numeric_limits<unsigned long long>::max();
 };
 
 struct VmStorageStat {
@@ -313,5 +326,8 @@ td::Result<td::BufferSlice> std_boc_serialize(Ref<Cell> root, int mode = 0);
 td::Result<std::vector<Ref<Cell>>> std_boc_deserialize_multi(td::Slice data,
                                                              int max_roots = BagOfCells::default_max_roots);
 td::Result<td::BufferSlice> std_boc_serialize_multi(std::vector<Ref<Cell>> root, int mode = 0);
+
+td::Status std_boc_serialize_to_file_large(std::shared_ptr<CellDbReader> reader, Cell::Hash root_hash,
+                                           td::FileFd& fd, int mode = 0);
 
 }  // namespace vm

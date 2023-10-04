@@ -36,6 +36,7 @@ set(TON_CRYPTO_SOURCE
   vm/debugops.cpp
   vm/tonops.cpp
   vm/boc.cpp
+  vm/large-boc-serializer.cpp
   vm/utils.cpp
   vm/vm.cpp
   tl/tlblib.cpp
@@ -68,6 +69,7 @@ set(TON_CRYPTO_SOURCE
   vm/arithops.h
   vm/atom.h
   vm/boc.h
+  vm/boc-writers.h
   vm/box.hpp
   vm/cellops.h
   vm/continuation.h
@@ -141,6 +143,7 @@ set(FIFT_SOURCE
   fift/Dictionary.cpp
   fift/Fift.cpp
   fift/IntCtx.cpp
+  fift/HashMap.cpp
   fift/Continuation.cpp
   fift/SourceLookup.cpp
   fift/utils.cpp
@@ -149,6 +152,7 @@ set(FIFT_SOURCE
   fift/Dictionary.h
   fift/Fift.h
   fift/IntCtx.h
+  fift/HashMap.h
   fift/Continuation.h
   fift/SourceLookup.h
   fift/utils.h
@@ -177,6 +181,7 @@ set(FUNC_LIB_SOURCE
   func/stack-transform.cpp
   func/optimize.cpp
   func/codegen.cpp
+  func/func.cpp
 )
 
 set(TLB_BLOCK_AUTO
@@ -264,13 +269,24 @@ set(BIGINT_TEST_SOURCE
   PARENT_SCOPE
 )
 
+set(USE_EMSCRIPTEN ${USE_EMSCRIPTEN} PARENT_SCOPE)
+
 
 add_library(ton_crypto STATIC ${TON_CRYPTO_SOURCE})
 target_include_directories(ton_crypto PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>)
 target_link_libraries(ton_crypto PUBLIC ${OPENSSL_CRYPTO_LIBRARY} tdutils tddb_utils)
+if (USE_EMSCRIPTEN)
+  target_link_options(ton_crypto PRIVATE -fexceptions)
+  target_compile_options(ton_crypto PRIVATE -fexceptions)
+endif()
 if (NOT WIN32)
-  target_link_libraries(ton_crypto PUBLIC dl z)
+  find_library(DL dl) 
+  if (DL)
+    target_link_libraries(ton_crypto PUBLIC dl z)
+  else()
+    target_link_libraries(ton_crypto PUBLIC z)
+  endif()
 endif()
 target_include_directories(ton_crypto SYSTEM PUBLIC $<BUILD_INTERFACE:${OPENSSL_INCLUDE_DIR}>)
 
@@ -286,6 +302,10 @@ target_link_libraries(test-ed25519-crypto PUBLIC ton_crypto)
 add_library(fift-lib ${FIFT_SOURCE})
 target_include_directories(fift-lib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 target_link_libraries(fift-lib PUBLIC ton_crypto ton_db tdutils ton_block)
+if (USE_EMSCRIPTEN)
+  target_link_options(fift-lib PRIVATE -fexceptions)
+  target_compile_options(fift-lib PRIVATE -fexceptions)
+endif()
 set_target_properties(fift-lib PROPERTIES OUTPUT_NAME fift)
 
 add_executable(fift fift/fift-main.cpp)
@@ -303,11 +323,31 @@ target_include_directories(ton_block PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SO
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/block> $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>)
 target_link_libraries(ton_block PUBLIC ton_crypto tdutils tdactor tl_api)
 
-add_executable(func func/func.cpp ${FUNC_LIB_SOURCE})
+add_executable(func func/func-main.cpp ${FUNC_LIB_SOURCE})
 target_include_directories(func PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 target_link_libraries(func PUBLIC ton_crypto src_parser git ton_block)
 if (WINGETOPT_FOUND)
   target_link_libraries_system(func wingetopt)
+endif()
+
+if (USE_EMSCRIPTEN)
+  add_executable(funcfiftlib funcfiftlib/funcfiftlib.cpp ${FUNC_LIB_SOURCE})
+  target_include_directories(funcfiftlib PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+  target_link_libraries(funcfiftlib PUBLIC fift-lib src_parser git)
+  target_link_options(funcfiftlib PRIVATE -sEXPORTED_RUNTIME_METHODS=FS,ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8,addFunction,removeFunction,setValue)
+  target_link_options(funcfiftlib PRIVATE -sEXPORTED_FUNCTIONS=_func_compile,_version,_malloc,_free,_setThrew)
+  target_link_options(funcfiftlib PRIVATE -sEXPORT_NAME=CompilerModule)
+  target_link_options(funcfiftlib PRIVATE -sERROR_ON_UNDEFINED_SYMBOLS=0)
+  target_link_options(funcfiftlib PRIVATE -sFILESYSTEM=1 -lnodefs.js)
+  target_link_options(funcfiftlib PRIVATE -Oz)
+  target_link_options(funcfiftlib PRIVATE -sIGNORE_MISSING_MAIN=1)
+  target_link_options(funcfiftlib PRIVATE -sAUTO_NATIVE_LIBRARIES=0)
+  target_link_options(funcfiftlib PRIVATE -sMODULARIZE=1)
+  target_link_options(funcfiftlib PRIVATE -sALLOW_MEMORY_GROWTH=1)
+  target_link_options(funcfiftlib PRIVATE -sALLOW_TABLE_GROWTH=1)
+  target_link_options(funcfiftlib PRIVATE --embed-file ${CMAKE_CURRENT_SOURCE_DIR}/fift/lib@/fiftlib)
+  target_link_options(funcfiftlib PRIVATE -fexceptions)
+  target_compile_options(funcfiftlib PRIVATE -fexceptions)
 endif()
 
 add_executable(tlbc tl/tlbc.cpp)
@@ -335,16 +375,26 @@ if (TON_USE_ASAN AND NOT WIN32)
 endif()
 
 file(MAKE_DIRECTORY smartcont/auto)
-if (NOT CMAKE_CROSSCOMPILING)
+if (NOT CMAKE_CROSSCOMPILING OR USE_EMSCRIPTEN)
   set(GENERATE_TLB_CMD tlbc)
-  add_custom_command(
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/block
-    COMMAND ${TURN_OFF_LSAN}
-    COMMAND ${GENERATE_TLB_CMD} -o block-auto -n block::gen -z block.tlb
-    COMMENT "Generate block tlb source files"
-    OUTPUT ${TLB_BLOCK_AUTO}
-    DEPENDS tlbc block/block.tlb
-  )
+  if (NOT USE_EMSCRIPTEN)
+    add_custom_command(
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/block
+      COMMAND ${TURN_OFF_LSAN}
+      COMMAND ${GENERATE_TLB_CMD} -o block-auto -n block::gen -z block.tlb
+      COMMENT "Generate block tlb source files"
+      OUTPUT ${TLB_BLOCK_AUTO}
+      DEPENDS tlbc block/block.tlb
+    )
+  else()
+    add_custom_command(
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/block
+      COMMAND ${TURN_OFF_LSAN}
+      COMMENT "Generate block tlb source files"
+      OUTPUT ${TLB_BLOCK_AUTO}
+      DEPENDS tlbc block/block.tlb
+    )
+  endif()
   add_custom_target(tlb_generate_block DEPENDS ${TLB_BLOCK_AUTO})
   add_dependencies(ton_block tlb_generate_block)
 
@@ -447,6 +497,6 @@ if (WINGETOPT_FOUND)
   target_link_libraries_system(test-weight-distr wingetopt)
 endif()
 
-install(TARGETS fift func pow-miner RUNTIME DESTINATION bin)
+install(TARGETS fift func create-state tlbc RUNTIME DESTINATION bin)
 install(DIRECTORY fift/lib/ DESTINATION lib/fift)
 install(DIRECTORY smartcont DESTINATION share/ton)
